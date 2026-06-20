@@ -22,6 +22,11 @@ import pytest
 
 PYTHON = sys.executable
 
+# 仓库根:scrape_new/tests/ → parents[2]。
+# subprocess.run(..., cwd=...) 不能写死 "E:/林视" 这种本地路径,
+# CI runner(linux/windows)找不到,会 FileNotFoundError。
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
 
 # ─── planner 测试(纯函数) ────────────────────────────────
 
@@ -148,7 +153,7 @@ class TestWizardCLI:
         env["PYTHONUTF8"] = "1"
         return subprocess.run(
             cmd, capture_output=True, text=True, encoding="utf-8",
-            timeout=15, cwd="E:/林视", env=env,
+            timeout=15, cwd=str(PROJECT_ROOT), env=env,
         )
 
     def test_wizard_json_output_is_parseable(self):

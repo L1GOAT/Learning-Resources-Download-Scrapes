@@ -18,6 +18,11 @@ from pathlib import Path
 
 import pytest
 
+# 仓库根:scrape_new/tests/ → parents[2]。
+# 用 PROJECT_ROOT 推导本地真课 fixture 路径,避免硬编码 "E:/林视"
+# 这种本地绝对路径(CI runner 是 linux/windows,找不到会 fail)。
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
 from scrape_new.services.scan_chaoxing import (
     detect_resource_role,
     scan_lesson_tabs,
@@ -407,7 +412,7 @@ class TestRound18ScanOnly:
         )
 
         # 真课数据(从 disk 加载,缺则 skip)
-        outline_p = Path("E:/林视/物理化学/视频/_chapter_outline.json")
+        outline_p = PROJECT_ROOT / "物理化学" / "视频" / "_chapter_outline.json"
         if not outline_p.exists():
             pytest.skip("物理化学 outline 不存在,跳过真课 driver 测试")
         outline = json.loads(outline_p.read_text(encoding="utf-8"))
