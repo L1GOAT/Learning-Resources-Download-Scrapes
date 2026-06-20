@@ -1,0 +1,66 @@
+{
+  "course_title": "Demo Course",
+  "platform": "chaoxing",
+  "records": [
+    {
+      "ch_num": 1,
+      "ls_num": 1,
+      "type": ".mp4",
+      "name": "Welcome.mp4",
+      "saved_name": "1.1_Welcome.mp4",
+      "objectid": "oid-video-1",
+      "tab_num": 0,
+      "size_bytes": 104857600,
+      "status": "downloaded",
+      "role": "video"
+    },
+    {
+      "ch_num": 1,
+      "ls_num": 1,
+      "type": ".pptx",
+      "name": "Welcome_PPT.pptx",
+      "saved_name": "1.1_Welcome_PPT.pptx",
+      "objectid": "oid-ppt-1",
+      "tab_num": 1,
+      "size_bytes": 2097152,
+      "status": "downloaded",
+      "role": "ppt"
+    },
+    {
+      "ch_num": 1,
+      "ls_num": 2,
+      "type": ".pptx",
+      "name": "Slides_Only_PPT.pptx",
+      "saved_name": "1.2_Slides_Only_PPT.pptx",
+      "objectid": "oid-ppt-only",
+      "tab_num": 1,
+      "size_bytes": 1572864,
+      "status": "downloaded",
+      "role": "ppt"
+    },
+    {
+      "ch_num": 2,
+      "ls_num": 2,
+      "type": ".mp4",
+      "name": "Dup_A.mp4",
+      "saved_name": "2.2_Duplicate.mp4",
+      "objectid": "oid-dup-1",
+      "tab_num": 0,
+      "size_bytes": 52428800,
+      "status": "downloaded",
+      "role": "video"
+    },
+    {
+      "ch_num": 2,
+      "ls_num": 2,
+      "type": ".mp4",
+      "name": "Dup_B.mp4",
+      "saved_name": "2.2_Duplicate.mp4",
+      "objectid": "oid-dup-2",
+      "tab_num": 0,
+      "size_bytes": 52428800,
+      "status": "downloaded",
+      "role": "video"
+    }
+  ]
+}

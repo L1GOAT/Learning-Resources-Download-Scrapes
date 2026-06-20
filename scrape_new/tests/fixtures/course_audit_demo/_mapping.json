@@ -1,0 +1,46 @@
+{
+  "course_id": "9999",
+  "course_title": "Demo Course",
+  "chapters": [
+    {
+      "index": 1,
+      "title": "第一章 Demo Intro",
+      "lessons": [
+        {
+          "id": "1.1",
+          "title": "Welcome",
+          "content_type": "video",
+          "video": "1.1_Welcome.mp4",
+          "attachments": ["1.1_Welcome_PPT.pptx"]
+        },
+        {
+          "id": "1.2",
+          "title": "Slides Only",
+          "content_type": "attachment",
+          "video": null,
+          "attachments": ["1.2_Slides_Only_PPT.pptx"]
+        }
+      ]
+    },
+    {
+      "index": 2,
+      "title": "第二章 Demo Advanced",
+      "lessons": [
+        {
+          "id": "2.1",
+          "title": "Missing Resource",
+          "content_type": "video",
+          "video": "2.1_Missing_Never_Downloaded.mp4",
+          "attachments": ["2.2_Duplicate.mp4"]
+        },
+        {
+          "id": "2.2",
+          "title": "Duplicate Demo",
+          "content_type": "video",
+          "video": "2.2_Slides_Put_In_Video_Slot.pptx",
+          "attachments": ["2.2_Duplicate.mp4"]
+        }
+      ]
+    }
+  ]
+}
