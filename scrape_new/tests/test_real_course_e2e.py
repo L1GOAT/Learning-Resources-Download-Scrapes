@@ -24,9 +24,8 @@ from pathlib import Path
 
 import pytest
 
-# 仓库根目录:scrape_new/tests/ → parents[2] = repo root。
-# CI runner 是 Linux/Windows,不能用硬编码 "E:/林视" 这种本地路径。
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# 共享路径常量 + workflow helper — 见 scrape_new/tests/_paths.py
+from scrape_new.tests._paths import PROJECT_ROOT, workflow_path
 
 from scrape_new.services.scan_chaoxing import (
     detect_resource_role, scan_lesson_tabs, build_scan_context,
@@ -544,9 +543,8 @@ class TestRunEntrypointConsistency:
         """P0:4 个 workflow 文件顶部都有 sys.path bootstrap(让直跑也能用)"""
         import re
         from pathlib import Path
-        workflows_dir = PROJECT_ROOT / "scrape_new" / "workflows"
         for wf in ("chaoxing.py", "xuetangx.py", "zhihuishu.py", "icourse163.py"):
-            p = workflows_dir / wf
+            p = workflow_path(wf)
             text = p.read_text(encoding="utf-8")
             # 必须在顶部 30 行内(导入 scrape_new 之前)
             head = text[:2000]  # 前 ~50 行
@@ -603,7 +601,7 @@ class TestRunEntrypointConsistency:
         (避免 `python -m` 时 RuntimeWarning)"""
         # 关键:__init__.py 不能 from .chaoxing import main ...
         from pathlib import Path
-        init = (PROJECT_ROOT / "scrape_new" / "workflows" / "__init__.py").read_text(encoding="utf-8")
+        init = workflow_path("__init__.py").read_text(encoding="utf-8")
         # 用正则,只匹配代码行(忽略注释),以 `from .X import` 起首
         import re
         # 多行:^ 注释前缀是 # 才算注释
@@ -625,9 +623,8 @@ class TestRunEntrypointConsistency:
     def test_workflow_files_have_only_one_syspath_insert(self):
         """P3:每个 workflow 文件 sys.path.insert 只出现 1 次(去重)"""
         from pathlib import Path
-        workflows_dir = PROJECT_ROOT / "scrape_new" / "workflows"
         for wf in ("chaoxing.py", "xuetangx.py", "zhihuishu.py", "icourse163.py"):
-            text = (workflows_dir / wf).read_text(encoding="utf-8")
+            text = workflow_path(wf).read_text(encoding="utf-8")
             count = text.count("sys.path.insert")
             assert count == 1, f"{wf} 含 {count} 处 sys.path.insert(应有 1 处)"
 

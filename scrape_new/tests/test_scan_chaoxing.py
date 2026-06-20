@@ -18,10 +18,8 @@ from pathlib import Path
 
 import pytest
 
-# 仓库根:scrape_new/tests/ → parents[2]。
-# 用 PROJECT_ROOT 推导本地真课 fixture 路径,避免硬编码 "E:/林视"
-# 这种本地绝对路径(CI runner 是 linux/windows,找不到会 fail)。
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# 共享路径常量 + 真课 fixture helper — 见 scrape_new/tests/_paths.py
+from scrape_new.tests._paths import PROJECT_ROOT, fixture_path
 
 from scrape_new.services.scan_chaoxing import (
     detect_resource_role,
@@ -411,7 +409,8 @@ class TestRound18ScanOnly:
             build_chapter_tree_data, write_chapter_tree_json, write_chapter_tree_md,
         )
 
-        # 真课数据(从 disk 加载,缺则 skip)
+        # 真课数据(从 disk 加载,缺则 skip)。位置:仓库根的兄弟目录,
+        # 不在 scrape_new/tests/fixtures/ 下,不能用 fixture_path()。
         outline_p = PROJECT_ROOT / "物理化学" / "视频" / "_chapter_outline.json"
         if not outline_p.exists():
             pytest.skip("物理化学 outline 不存在,跳过真课 driver 测试")
