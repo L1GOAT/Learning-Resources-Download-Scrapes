@@ -2,6 +2,9 @@
 
 **当前版本：v0.3.0**
 
+[![CI](https://github.com/L1GOAT/Learning-Resources-Download-Scrapes/actions/workflows/ci.yml/badge.svg)](https://github.com/L1GOAT/Learning-Resources-Download-Scrapes/actions/workflows/ci.yml)
+
+
 现代化重构版本，支持多种资源类型的网页下载 + 老师后台建课。
 
 ## 核心能力 / Why this tool is safer

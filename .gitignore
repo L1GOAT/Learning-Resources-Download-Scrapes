@@ -8,6 +8,12 @@
 # Repository metadata.
 !.gitignore
 !.gitattributes
+!.github/
+!.github/**
+
+# Community / contribution docs.
+!SECURITY.md
+!CONTRIBUTING.md
 
 # Main open-source package.
 !scrape_new/
