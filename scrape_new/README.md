@@ -7,6 +7,15 @@
 
 现代化重构版本，支持多种资源类型的网页下载 + 老师后台建课。
 
+## 文档导航
+
+- [USER_GUIDE.md](docs/USER_GUIDE.md) — 5 分钟从 0 跑通完整链路
+- [docs/examples/offline_e2e_workflow.md](docs/examples/offline_e2e_workflow.md) — 离线 demo 流程
+- [docs/examples/resource_audit_demo.md](docs/examples/resource_audit_demo.md) — 资源审计示例报告
+- [SECURITY.md](../SECURITY.md) — 安全策略(不提交哪些)
+- [CONTRIBUTING.md](../CONTRIBUTING.md) — 贡献指南
+- [RELEASE_NOTES.md](../RELEASE_NOTES.md) — 当前版本说明
+
 ## 核心能力 / Why this tool is safer
 
 这个工具最强的三个设计点是：**资源审计 + 计划先行的上传 + 向导模式**。
