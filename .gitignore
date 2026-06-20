@@ -1,0 +1,119 @@
+# Safe-by-default GitHub export.
+# This workspace contains real course data, HAR files, cookies, upload plans,
+# manifests, videos, PPTs, and historical scripts with embedded credentials.
+# Keep the repository allowlisted: ignore everything first, then unignore code.
+
+*
+
+# Repository metadata.
+!.gitignore
+!.gitattributes
+
+# Main open-source package.
+!scrape_new/
+!scrape_new/**
+
+# Keep tests at root if any are intentionally shared.
+!tests/
+!tests/**
+
+# Python / tooling noise.
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.omc/
+**/.omc/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Secrets and browser/network captures.
+.env
+.env.*
+*.env
+cookies.txt
+cookies_new.txt
+*cookie*.txt
+*cookies*.txt
+*.har
+*.curl
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+.mcp.json
+
+# Course media and generated course artifacts.
+*.mp4
+*.flv
+*.m3u8
+*.ts
+*.ppt
+*.pptx
+*.doc
+*.docx
+*.pdf
+*.zip
+*.rar
+*.7z
+*.part
+*.corrupt
+*_upload_*.json
+*_upload_log.csv
+*_upload_report.json
+*_mapping.json
+*_chapter_outline.json
+*_chapter_tree.json
+*_chapter_tree.md
+*_resource_naming_manifest.json
+*_resource_naming_manifest.csv
+*_retry_downloads.json
+*_retry_resources.json
+*_scan_cache.json
+*_scanned_resources.json
+*_resource_discovery_report.json
+*_resource_discovery_report.md
+*_download_log.csv
+*_source_manifest.json
+*_report.json
+*_review.html
+
+# Local course/project data directories.
+archive/
+opensource/
+_codex_upload_test/
+免疫课程视频/
+博弈论课程/
+地震灾害应急/
+导入模版_unpacked/
+教学媒体的理论与实践/
+景德镇学院AI慕课材料汇总/
+服务礼仪/
+物理化学/
+计算机组装与维护/
+逻辑学/
+逻辑学_dl_test/
+逻辑学_scan/
+
+# Local images and temporary scratch files in the workspace root.
+/*.png
+/*.jpg
+/*.jpeg
+/*.gif
+/*.bmp
+/*.webp
+/_tmp_*
+/_test_*
+
+# Tiny test fixtures that are intentionally part of the public package.
+!scrape_new/tests/fixtures/site/assets/sample.pdf
+!scrape_new/tests/fixtures/site/assets/test.jpg
+!scrape_new/tests/fixtures/site/assets/video.mp4

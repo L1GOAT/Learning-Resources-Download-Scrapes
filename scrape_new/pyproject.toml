@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "scrape-new"
+version = "0.2.0"
+description = "网页资源扒取工具箱 - 现代化重构版本"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+keywords = ["scraper", "downloader", "web", "video", "image"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "requests>=2.28.0",
+]
+
+[project.optional-dependencies]
+crypto = ["pycryptodome>=3.19.0"]
+html = ["beautifulsoup4>=4.12.0"]
+dev = [
+    "pytest>=7.0.0",
+    "ruff>=0.1.0",
+]
+all = [
+    "pycryptodome>=3.19.0",
+    "beautifulsoup4>=4.12.0",
+]
+
+[project.scripts]
+scrape-new = "scrape_new.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["scrape_new*"]
+
+[tool.pytest.ini_options]
+testpaths = ["scrape_new/tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
