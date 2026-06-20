@@ -42,8 +42,10 @@ jobs:
           pip install pytest
 
       - name: Compile check
-        run: python -m compileall -q scrape_new
+        # 末尾加 "/" 强制当目录,避免在某些 PYTHONPATH 配置下被当包名解析。
+        run: python -m compileall -q scrape_new/
 
       - name: Run tests
         # 全部本地 fixture / mock,无网络课程访问。
-        run: python -m pytest scrape_new/tests -q
+        # -v 替换 -q 便于在 GitHub Actions UI 里逐行看;--tb=short 失败时打短 traceback。
+        run: python -m pytest scrape_new/tests -v --tb=short
