@@ -69,6 +69,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             from .upload.runner import run_upload_cli
             return run_upload_cli(args.upload_args)
 
+        if args.subcmd in ("wizard", "assistant"):
+            return _run_wizard(args)
+
+        if args.subcmd == "audit":
+            return _cmd_audit(args)
+
         # 单个下载任务
         if not args.url:
             parser.error("请提供 URL")
@@ -211,6 +217,104 @@ def _create_parser() -> argparse.ArgumentParser:
         help="上传命令参数",
     )
 
+    # wizard / assistant 子命令:交互式工作流向导
+    # 两种入口指向同一实现(assistant 是 wizard 的 alias,用户记哪个用哪个)
+    for alias_name, alias_help in (
+        ("wizard", "交互式向导(下载/扫描/建 mapping/上传)"),
+        ("assistant", "wizard 的别名(同上)"),
+    ):
+        sp = subparsers.add_parser(
+            alias_name,
+            help=alias_help,
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog="""
+示例:
+  # 交互模式(问问题收集参数)
+  python -m scrape_new wizard
+
+  # 纯 dry-run(只出 plan,不问问题不执行)— GUI 友好
+  python -m scrape_new wizard --intent download --platform chaoxing \\
+      --url "https://..." --output-dir mycourse --cookie-source env
+
+  # JSON 输出(给 GUI / CI 消费)
+  python -m scrape_new wizard --intent upload --course-id 1234 \\
+      --cookie-source env --json
+
+  # Markdown 输出(给 README / issue 写)
+  python -m scrape_new wizard --intent build_mapping --markdown
+
+设计原则:
+  - 默认 plan-first:任何 upload 永远先 plan-only
+  - 危险操作(destructive/requires_confirmation)显式标出
+  - 不直接执行,先打印 plan,人工 review 后再确认
+            """,
+        )
+        sp.add_argument("--intent", "-i", required=False,
+                        choices=["download", "scan", "build_mapping", "upload",
+                                 "retry", "modify", "audit", "unknown"],
+                        help="用户意图")
+        sp.add_argument("--platform", "-p", required=False,
+                        choices=["chaoxing", "xuetangx", "zhihuishu", "icourse163"],
+                        help="平台")
+        sp.add_argument("--url", "-u", required=False, help="课程 URL")
+        sp.add_argument("--output-dir", "-o", required=False, default="./output",
+                        help="输出目录")
+        sp.add_argument("--cookie-source", "-c", required=False,
+                        choices=["curl", "string", "file", "env", "none"],
+                        default="none", help="cookie 来源")
+        sp.add_argument("--course-id", required=False, help="课程 ID(上传用)")
+        sp.add_argument("--mapping-path", required=False, help="mapping.json 路径")
+        sp.add_argument("--outline-path", required=False, help="outline 路径")
+        sp.add_argument("--videos-dir", required=False, help="视频文件夹")
+        sp.add_argument("--plan-path", required=False, help="_upload_plan.json 路径")
+        sp.add_argument("--retry-list", required=False, help="_retry_downloads.json 路径")
+        sp.add_argument("--only-lessons", required=False, help="只动这些 lesson")
+        sp.add_argument("--only-resources", required=False, help="只动这些 (lesson,kind)")
+        sp.add_argument("--reset-confirm", required=False, help="显式传 course_id 才能 reset")
+        sp.add_argument("--include-empty-lessons", action="store_true",
+                        help="build-mapping 保留空章")
+        sp.add_argument("--max-tabs", type=int, default=4, help="多 tab 探测数")
+        sp.add_argument("--json", action="store_true", help="输出 JSON 计划(GUI/CI)")
+        sp.add_argument("--markdown", action="store_true", help="输出 Markdown 计划")
+        sp.add_argument("--no-color", action="store_true", help="关闭 ANSI 颜色")
+        sp.add_argument("--yes", action="store_true",
+                        help="跳过二次确认(仅对非危险 step 生效,危险 step 仍需确认)")
+
+    # audit 子命令:资源智能审计(本地文件读,生成 _resource_audit.{json,md,csv})
+    audit_parser = subparsers.add_parser(
+        "audit",
+        help="资源智能审计(漏/错/配/缺)— 读本地文件,无网络",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  # 完整审计(章节树 + manifest + mapping 全给)
+  python -m scrape_new audit \\
+      --chapter-tree _chapter_tree.json \\
+      --manifest _resource_naming_manifest.json \\
+      --mapping _mapping.json \\
+      --output-dir .
+
+  # 只审计 mapping 错配
+  python -m scrape_new audit --mapping _mapping.json \\
+      --manifest _resource_naming_manifest.json --output-dir .
+
+  # 只审计扫描漏扫
+  python -m scrape_new audit --chapter-tree _chapter_tree.json \\
+      --manifest _resource_naming_manifest.json --output-dir .
+
+设计:
+  - 无网络 / 无 cookie / 不动真实数据
+  - 输出 3 份报告:json / md / csv(GUI 可直接消费)
+  - 含风险等级 + 置信度 + 证据链
+        """,
+    )
+    audit_parser.add_argument("--chapter-tree", help="_chapter_tree.json 路径")
+    audit_parser.add_argument("--manifest", help="_resource_naming_manifest.json 路径")
+    audit_parser.add_argument("--mapping", help="_mapping.json 路径(可选)")
+    audit_parser.add_argument("--output-dir", default=".", help="报告输出目录")
+    audit_parser.add_argument("--expected-tab-count", type=int, default=None,
+                              help="期望的 tab 扫描数(给 scan-only 用,默认 None)")
+
     return parser
 
 
@@ -277,3 +381,261 @@ def _run_test() -> int:
     except ImportError:
         print("请安装 pytest: pip install pytest", file=sys.stderr)
         return 1
+
+
+# ─── wizard / assistant 向导 ─────────────────────────────────────
+
+def _run_wizard(args: argparse.Namespace) -> int:
+    """wizard / assistant 主入口。
+
+    设计原则:
+      1. 交互层只负责:收集答案 → 调 build_workflow_plan → 打印/输出 → 可选执行
+      2. 危险操作(destructive / requires_confirmation)绝不自动执行,必须二次确认
+      3. 默认 plan-first:upload 永远先生成 plan,人工 review 后才 --apply-plan
+      4. --json / --markdown 输出纯数据,GUI / CI 可消费
+      5. --dry-run / 无 --intent 时进入交互模式(问问题)
+    """
+    # Windows subprocess 默认 GBK,UTF-8 字符(▶ ⚠️)会炸。强制 UTF-8 输出。
+    import sys as _sys
+    if _sys.platform.startswith("win"):
+        try:
+            _sys.stdout.reconfigure(encoding="utf-8")
+            _sys.stderr.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
+    from .services.workflow_planner import build_workflow_plan, Intent, Platform
+
+    # 1) 收集参数
+    intent = getattr(args, "intent", None)
+    platform = getattr(args, "platform", None) or Platform.UNKNOWN.value
+    course_url = getattr(args, "url", "") or ""
+    output_dir = getattr(args, "output_dir", "./output")
+    cookie_source = getattr(args, "cookie_source", "none")
+    use_json = bool(getattr(args, "json", False))
+    use_markdown = bool(getattr(args, "markdown", False))
+    yes_all = bool(getattr(args, "yes", False))
+
+    # 收集 options dict
+    options = {}
+    for k in ("course_id", "mapping_path", "outline_path", "videos_dir",
+              "plan_path", "retry_list", "only_lessons", "only_resources",
+              "reset_confirm", "max_tabs"):
+        v = getattr(args, k, None)
+        if v is not None and v != "":
+            options[k] = v
+    if getattr(args, "include_empty_lessons", False):
+        options["include_empty_lessons"] = True
+
+    # 2) 交互模式(没 --intent 时):问最少的问题
+    if intent is None:
+        intent = _wizard_ask_intent()
+        if platform == Platform.UNKNOWN.value:
+            platform = _wizard_ask_platform()
+        if not course_url:
+            course_url = _wizard_ask("课程 URL", "")
+        if intent in (Intent.DOWNLOAD.value, Intent.SCAN_ONLY.value,
+                      Intent.RETRY_FAILED.value):
+            if cookie_source == "none":
+                cookie_source = _wizard_ask_cookie_source()
+        if intent in (Intent.UPLOAD.value, Intent.MODIFY.value):
+            if not options.get("course_id"):
+                options["course_id"] = _wizard_ask("课程 ID", "")
+        if not output_dir or output_dir == "./output":
+            output_dir = _wizard_ask("输出目录", "./output")
+
+    # 3) 调纯函数 planner(GUI 友好:不执行任何命令)
+    plan = build_workflow_plan(
+        intent=intent, platform=platform, course_url=course_url,
+        output_dir=output_dir, cookie_source=cookie_source, options=options,
+    )
+
+    # 4) 输出格式
+    if use_json:
+        print(plan.to_json(indent=2))
+        return 0
+
+    # 默认 Markdown(给终端 / GUI 渲染)— 但 --no-color 关闭 ANSI
+    if use_markdown:
+        print(plan.to_markdown())
+        return 0
+
+    # 默认人类可读:Markdown + 二次确认提示
+    print(plan.to_markdown())
+    print()
+    if plan.required_confirmations:
+        print("=" * 60)
+        print("⚠️  上述 plan 含需要二次确认的危险操作:")
+        for sid in plan.required_confirmations:
+            print(f"   - {sid}")
+        print("=" * 60)
+        if yes_all:
+            print("⚠️  --yes 已传,但危险 step 仍需逐个确认(GUI 应弹模态对话框)")
+
+    # 5) 非 dry-run 时,询问是否执行非危险 step
+    dangerous_ids = {s.id for s in plan.steps if s.destructive}
+    safe_steps = [s for s in plan.steps if s.id not in dangerous_ids]
+    if safe_steps and not use_json and not use_markdown:
+        print()
+        print(f"非危险步骤 {len(safe_steps)} 个,可用 --json 输出 plan")
+        # 实际执行留待 GUI:CLI 模式默认只打印,需要 --execute 才调 subprocess
+        # (避免 CLI 模式误执行 — 默认 dry-run)
+
+    return 0
+
+
+def _wizard_ask_intent() -> str:
+    """交互模式:问用户意图。"""
+    print("=" * 60)
+    print("scrape_new wizard — 交互式工作流向导")
+    print("=" * 60)
+    print()
+    print("你要做什么?")
+    print("  1) download    下载课程(默认包含 scan + download)")
+    print("  2) scan        只扫描课程资源,不下文件")
+    print("  3) build_mapping 从 outline + 视频文件夹 → _mapping.json")
+    print("  4) upload      上传到老师后台(默认 plan-first)")
+    print("  5) retry       重试失败下载")
+    print("  6) modify      局部上传(只动某一节/某个资源)")
+    print()
+    while True:
+        choice = input("请输入数字 [1-6] 或直接输入意图: ").strip()
+        mapping = {"1": "download", "2": "scan", "3": "build_mapping",
+                  "4": "upload", "5": "retry", "6": "modify"}
+        if choice in mapping:
+            return mapping[choice]
+        if choice in ("download", "scan", "build_mapping", "upload", "retry", "modify"):
+            return choice
+        print("  输入有误,请重试(1-6 或意图名)")
+
+
+def _wizard_ask_platform() -> str:
+    print()
+    print("哪个平台?")
+    print("  chaoxing / xuetangx / zhihuishu / icourse163")
+    while True:
+        p = input("平台: ").strip().lower()
+        if p in ("chaoxing", "xuetangx", "zhihuishu", "icourse163"):
+            return p
+        print("  输入有误,请重试")
+
+
+def _wizard_ask(prompt: str, default: str = "") -> str:
+    """交互模式:问用户一个字符串值"""
+    suffix = f" [{default}]" if default else ""
+    val = input(f"{prompt}{suffix}: ").strip()
+    return val or default
+
+
+def _wizard_ask_cookie_source() -> str:
+    print()
+    print("cookie 来源?(没 cookie 也能跑 scan-only 和 build-mapping)")
+    print("  curl / string / file / env / none")
+    while True:
+        c = input("cookie-source: ").strip().lower()
+        if c in ("curl", "string", "file", "env", "none"):
+            return c
+        print("  输入有误")
+
+
+def _cmd_audit(args: argparse.Namespace) -> int:
+    """audit 子命令 — 读本地文件,产 _resource_audit.{json,md,csv}。
+
+    设计:
+      - 纯本地 IO,无网络 / 无 cookie
+      - 提供 chapter-tree + manifest 走 scan audit
+      - 提供 mapping 走 mapping audit
+      - 两份都给:合并报告(扫描 + mapping)
+    """
+    from .services.resource_audit import (
+        audit_scan_completeness, audit_mapping_alignment,
+        write_resource_audit_reports, CourseAuditReport,
+    )
+
+    output_dir = Path(getattr(args, "output_dir", ".") or ".")
+    chapter_tree_path = getattr(args, "chapter_tree", None)
+    manifest_path = getattr(args, "manifest", None)
+    mapping_path = getattr(args, "mapping", None)
+    expected_tab_count = getattr(args, "expected_tab_count", None)
+
+    if not (chapter_tree_path or manifest_path or mapping_path):
+        print("[错误] 至少给一个:--chapter-tree / --manifest / --mapping", file=sys.stderr)
+        return 1
+
+    chapter_tree: dict = {}
+    scanned: list[dict] = []
+    if chapter_tree_path:
+        cp = Path(chapter_tree_path)
+        if not cp.exists():
+            print(f"[错误] chapter-tree 不存在: {cp}", file=sys.stderr)
+            return 1
+        chapter_tree = json.loads(cp.read_text(encoding="utf-8"))
+    if manifest_path:
+        mp = Path(manifest_path)
+        if not mp.exists():
+            print(f"[错误] manifest 不存在: {mp}", file=sys.stderr)
+            return 1
+        m = json.loads(mp.read_text(encoding="utf-8"))
+        scanned = m.get("records", [])
+
+    # 1) scan audit
+    if chapter_tree or scanned:
+        report = audit_scan_completeness(
+            chapter_tree, scanned, expected_tab_count=expected_tab_count,
+        )
+    else:
+        report = CourseAuditReport()
+
+    # 2) mapping audit(如有)
+    if mapping_path:
+        mp = Path(mapping_path)
+        if mp.exists():
+            mapping = json.loads(mp.read_text(encoding="utf-8"))
+            manifest = {}
+            if manifest_path:
+                manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+            # manifest 或 chapter_tree 任一当作"已下载/已扫描"来源
+            src_for_mapping = manifest or chapter_tree or {}
+            mapping_report = audit_mapping_alignment(mapping, src_for_mapping)
+            # 合并:mapping audit 加到 global_issues
+            report.global_issues.extend(mapping_report.global_issues)
+            report.recommendations.extend(mapping_report.recommendations)
+            # 合并 lesson-level audit(同名 lesson 覆盖)
+            existing_ids = {ls.lesson_id for ls in report.lessons}
+            for ls in mapping_report.lessons:
+                if ls.lesson_id in existing_ids:
+                    # 找原 lesson,把 issues / resources 合并
+                    target = next(x for x in report.lessons if x.lesson_id == ls.lesson_id)
+                    target.issues = list(set(target.issues + ls.issues))
+                    target.resources.extend(ls.resources)
+                    _raise_risk_local(target, ls.risk_level)
+                else:
+                    report.lessons.append(ls)
+            # 更新 summary
+            for k, v in mapping_report.summary.items():
+                report.summary[k] = report.summary.get(k, 0) + v
+        else:
+            print(f"[警告] mapping 不存在: {mp}(跳过 mapping audit)", file=sys.stderr)
+
+    # 3) 写报告
+    paths = write_resource_audit_reports(report, output_dir)
+    print(f"[audit] 报告已写:")
+    for k, p in paths.items():
+        print(f"  - {p}")
+    # 摘要输出
+    s = report.summary
+    print()
+    print("=" * 60)
+    print(f"  课: {report.course_title or '(未填)'}")
+    print(f"  总览: {s}")
+    print(f"  全局问题: {len(report.global_issues)}")
+    print(f"  建议: {len(report.recommendations)}")
+    print("=" * 60)
+    return 0
+
+
+def _raise_risk_local(lesson_audit, level: str) -> None:
+    """只升不降(从 mapping audit 继承)"""
+    order = {"ok": 0, "low": 1, "medium": 2, "high": 3}
+    if order[level] > order[lesson_audit.risk_level]:
+        lesson_audit.risk_level = level

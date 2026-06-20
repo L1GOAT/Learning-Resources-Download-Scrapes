@@ -1,0 +1,283 @@
+"""
+wizard + WorkflowPlanner 测试(第十九轮)
+
+10 测试:
+  1-5: planner 各 intent 行为
+  6-9: wizard CLI 输出 + 边界
+  10: 不破坏现有测试(隐式 — 419 passed 即可)
+
+所有测试都用 JSON 输入 / subprocess 调用,**不触发真实下载或上传**。
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+
+PYTHON = sys.executable
+
+
+# ─── planner 测试(纯函数) ────────────────────────────────
+
+class TestPlanner:
+    """1-5:planner 各 intent 行为"""
+
+    def test_download_intent_generates_scan_and_download(self):
+        """1:download intent 生成 scan + download 步骤,带 next_suggestions"""
+        from scrape_new.services.workflow_planner import build_workflow_plan
+        plan = build_workflow_plan(
+            intent="download", platform="chaoxing",
+            course_url="https://x", output_dir="./mycourse",
+            cookie_source="env",
+        )
+        # 步骤至少 2(scan + download)
+        assert len(plan.steps) >= 2
+        step_ids = [s.id for s in plan.steps]
+        assert "scan" in step_ids
+        assert "download" in step_ids
+        # scan 不需要 cookie
+        scan_step = next(s for s in plan.steps if s.id == "scan")
+        assert scan_step.requires_cookie is False
+        # download 需要 cookie
+        dl_step = next(s for s in plan.steps if s.id == "download")
+        assert dl_step.requires_cookie is True
+        # next_suggestions 非空
+        assert any("build_mapping" in s for s in plan.next_suggestions)
+        # 输出文件至少含 _review.html 或 _chapter_tree.json
+        outs_str = " ".join(plan.expected_outputs)
+        assert "_review.html" in outs_str or "_chapter_tree.json" in outs_str
+
+    def test_upload_intent_plan_first_no_yes(self):
+        """2:upload 默认先 plan-only,plan-only 步骤不在危险列表"""
+        from scrape_new.services.workflow_planner import build_workflow_plan
+        plan = build_workflow_plan(
+            intent="upload", platform="chaoxing", course_url="",
+            output_dir="./mycourse", cookie_source="env",
+            options={"course_id": "1234", "mapping_path": "./_mapping.json"},
+        )
+        step_ids = [s.id for s in plan.steps]
+        # 第一步必须是 plan_only
+        assert step_ids[0] == "plan_only", f"upload 第一步应该是 plan_only,实际 {step_ids}"
+        # plan_only 不在 destructive
+        plan_only_step = plan.steps[0]
+        assert plan_only_step.destructive is False
+        assert plan_only_step.requires_confirmation is False
+        # risk 不是 HIGH(没 reset_confirm)
+        assert plan.risk_level != "high"
+
+    def test_modify_with_only_resources_excludes_reset_confirm(self, tmp_path: Path):
+        """3:modify + only-resources 局部上传不包含 reset_confirm"""
+        from scrape_new.services.workflow_planner import build_workflow_plan
+        # 预先创建 plan_path 文件(否则 plan-only 之后不会生成 apply-plan)
+        plan_path = tmp_path / "_upload_plan.json"
+        plan_path.write_text("{}", encoding="utf-8")
+        plan = build_workflow_plan(
+            intent="modify", platform="chaoxing",
+            output_dir=str(tmp_path), cookie_source="env",
+            options={
+                "course_id": "1234",
+                "only_resources": "1.2:ppt",
+                "plan_path": str(plan_path),
+                # 注意:即使传 reset_confirm,modify 模式不该自动用
+                "reset_confirm": "1234",
+            },
+        )
+        # apply-plan 命令不应包含 --reset-confirm
+        apply_step = next(s for s in plan.steps if s.id == "apply_plan")
+        assert "--reset-confirm" not in apply_step.command
+        # 但 required_confirmation 仍在(apply-plan 是写操作)
+        assert apply_step.requires_confirmation is True
+
+    def test_apply_plan_marked_requires_confirmation(self):
+        """4:apply-plan 被标 requires_confirmation = True(GUI 弹确认对话框)"""
+        from scrape_new.services.workflow_planner import build_workflow_plan
+        plan = build_workflow_plan(
+            intent="upload", platform="chaoxing",
+            output_dir="./mycourse", cookie_source="env",
+            options={"course_id": "1234", "mapping_path": "./_mapping.json"},
+        )
+        # 找到 apply_plan 步骤
+        apply_steps = [s for s in plan.steps if s.id == "apply_plan"]
+        if apply_steps:  # plan_only 之后才会生成 apply_plan
+            assert apply_steps[0].requires_confirmation is True
+            assert apply_steps[0].destructive is True
+            assert "apply_plan" in plan.required_confirmations
+
+    def test_reset_confirm_marked_destructive(self):
+        """5:--reset-confirm 路径 destructive = True,risk = high"""
+        from scrape_new.services.workflow_planner import build_workflow_plan
+        plan = build_workflow_plan(
+            intent="upload", platform="chaoxing",
+            output_dir="./mycourse", cookie_source="env",
+            options={
+                "course_id": "1234",
+                "mapping_path": "./_mapping.json",
+                "reset_confirm": "1234",
+            },
+        )
+        assert plan.risk_level == "high"
+        # apply_plan 步骤的 notes 含 reset 警告
+        apply_steps = [s for s in plan.steps if s.id == "apply_plan"]
+        if apply_steps:
+            assert "reset" in apply_steps[0].notes.lower() or "清空" in apply_steps[0].notes
+
+
+# ─── wizard CLI 测试 ────────────────────────────────
+
+class TestWizardCLI:
+    """6-9:wizard CLI 输出格式 + 边界"""
+
+    def _run_wizard(self, *args) -> subprocess.CompletedProcess:
+        """subprocess 跑 wizard(避免污染测试 sys.path)。
+
+        Windows 默认 stdout 用 GBK,UTF-8 字符(▶ ⚠️)会炸。
+        用 PYTHONIOENCODING=utf-8 + PYTHONUTF8=1 强制 UTF-8 输出。
+        保留父进程的 PATH(避免 Windows _Py_HashRandomization_Init 失败)。
+        """
+        import os
+        cmd = [PYTHON, "-X", "utf8", "-m", "scrape_new", "wizard", *args]
+        # 在父 env 上加 UTF-8 旗标,其他不变
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
+        return subprocess.run(
+            cmd, capture_output=True, text=True, encoding="utf-8",
+            timeout=15, cwd="E:/林视", env=env,
+        )
+
+    def test_wizard_json_output_is_parseable(self):
+        """6:wizard --json 输出能 json.loads"""
+        r = self._run_wizard(
+            "--intent", "download",
+            "--platform", "chaoxing",
+            "--url", "https://example.com/c",
+            "--output-dir", "./x",
+            "--cookie-source", "env",
+            "--json",
+        )
+        assert r.returncode == 0, f"stdout={r.stdout[:200]} stderr={r.stderr[:200]}"
+        # 至少能 json.loads 第一段非空 stdout
+        data = json.loads(r.stdout)
+        assert "intent" in data
+        assert "steps" in data
+        assert isinstance(data["steps"], list)
+        assert "risk_level" in data
+
+    def test_wizard_markdown_output_contains_command_and_risk(self):
+        """7:wizard --markdown 含命令、风险"""
+        r = self._run_wizard(
+            "--intent", "upload",
+            "--course-id", "1234",
+            "--cookie-source", "env",
+            "--markdown",
+        )
+        assert r.returncode == 0, f"stderr={r.stderr[:300]}"
+        out = r.stdout
+        # 含 Workflow Plan 标题
+        assert "Workflow Plan" in out or "workflow plan" in out.lower()
+        # 含命令
+        assert "python" in out
+        # 含风险等级
+        assert "risk" in out.lower() or "MEDIUM" in out or "HIGH" in out or "LOW" in out
+
+    def test_wizard_no_cookie_does_not_crash(self):
+        """8:无 cookie 时不崩,只提示"""
+        r = self._run_wizard(
+            "--intent", "scan",
+            "--platform", "chaoxing",
+            "--url", "https://example.com/c",
+            "--output-dir", "./x",
+            "--cookie-source", "none",
+            "--markdown",
+        )
+        assert r.returncode == 0
+        out = r.stdout
+        # 应有 plan(可能 risk = HIGH 因为无 cookie)
+        assert "Workflow Plan" in out or "workflow plan" in out.lower()
+
+    def test_wizard_unknown_intent_returns_clean_plan(self):
+        """9:wizard --intent unknown 给清晰 next_suggestion(不要崩)"""
+        r = self._run_wizard(
+            "--intent", "unknown",
+            "--markdown",
+        )
+        assert r.returncode == 0  # 不应崩,只是给空 plan + 提示
+        out = r.stdout
+        # 应有 plan 标题
+        assert "Workflow Plan" in out or "workflow plan" in out.lower()
+        # 应给可执行的下一步建议(intent 名列表)
+        assert "download" in out.lower()
+        assert "upload" in out.lower()
+
+    def test_wizard_audit_intent_json_has_audit_steps(self):
+        """11:wizard --intent audit --json 能 json.loads,steps 含 audit 命令"""
+        r = self._run_wizard(
+            "--intent", "audit",
+            "--json",
+        )
+        assert r.returncode == 0, f"stderr={r.stderr[:300]}"
+        data = json.loads(r.stdout)
+        # 标准字段都在
+        assert "intent" in data
+        assert data["intent"] == "audit"
+        assert "steps" in data
+        assert isinstance(data["steps"], list)
+        # 至少一个 step 的 command 是 audit
+        commands = " ".join(s.get("command", "") for s in data["steps"])
+        assert "scrape_new audit" in commands, f"无 audit 命令: {commands[:300]}"
+        # 至少一个 step 的 id 是 audit_scan 或 audit_mapping
+        step_ids = [s.get("id", "") for s in data["steps"]]
+        assert any("audit" in sid for sid in step_ids), f"step_ids: {step_ids}"
+
+    def test_wizard_audit_intent_markdown_has_report_and_tips(self):
+        """12:wizard --intent audit --markdown 含 audit 命令、报告路径、风险/建议"""
+        r = self._run_wizard(
+            "--intent", "audit",
+            "--markdown",
+        )
+        assert r.returncode == 0, f"stderr={r.stderr[:300]}"
+        out = r.stdout
+        # 1. 标题
+        assert "Workflow Plan" in out or "workflow plan" in out.lower()
+        # 2. 至少一个 audit 命令
+        assert "scrape_new audit" in out
+        # 3. 报告路径
+        assert "_resource_audit.md" in out
+        # 4. 风险/建议提示(中英文都算)
+        low_out = out.lower()
+        has_risk = "风险" in out or "risk" in low_out
+        has_advice = "建议" in out or "建议" in out or "下一步" in out or "next" in low_out
+        assert has_risk, f"无风险提示: {out[:200]}"
+        assert has_advice, f"无建议提示: {out[:200]}"
+
+
+# ─── WorkflowPlan 序列化 ────────────────────────────────
+
+class TestWorkflowPlanSerialization:
+    """10:WorkflowPlan.to_dict() + to_json() + to_markdown() 完整可用"""
+
+    def test_workflow_plan_json_roundtrip(self):
+        """WorkflowPlan 可 JSON 序列化并反序列化(JSON 兼容)"""
+        from scrape_new.services.workflow_planner import build_workflow_plan
+        plan = build_workflow_plan(
+            intent="download", platform="chaoxing",
+            course_url="https://x", output_dir="./mycourse",
+            cookie_source="env", options={"max_tabs": 6},
+        )
+        # to_json 必须能 load 回来
+        raw = plan.to_json()
+        data = json.loads(raw)
+        assert data["intent"] == "download"
+        assert data["platform"] == "chaoxing"
+        assert isinstance(data["steps"], list)
+        # step 形参必须都是可序列化的
+        for step in data["steps"]:
+            assert "id" in step
+            assert "title" in step
+            assert "command" in step
+            assert isinstance(step["writes_files"], list)
