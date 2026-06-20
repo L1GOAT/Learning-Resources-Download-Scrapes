@@ -7,7 +7,12 @@
 from __future__ import annotations
 
 import argparse
+import json
+import shlex
+import subprocess
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Sequence
 
@@ -279,6 +284,12 @@ def _create_parser() -> argparse.ArgumentParser:
         sp.add_argument("--no-color", action="store_true", help="关闭 ANSI 颜色")
         sp.add_argument("--yes", action="store_true",
                         help="跳过二次确认(仅对非危险 step 生效,危险 step 仍需确认)")
+        # 逐步执行(第一版,只允许非危险 step)
+        sp.add_argument("--execute-step", required=False, default=None,
+                        help="执行 plan 中指定 id 的 step(仅非危险 step,"
+                             "危险 step 仍拒绝执行并提示人工复制命令)")
+        sp.add_argument("--run-log", required=False, default=None,
+                        help="执行日志 jsonl 路径(默认 <output_dir>/_wizard_runs.jsonl)")
 
     # audit 子命令:资源智能审计(本地文件读,生成 _resource_audit.{json,md,csv})
     audit_parser = subparsers.add_parser(
@@ -460,6 +471,12 @@ def _run_wizard(args: argparse.Namespace) -> int:
         print(plan.to_markdown())
         return 0
 
+    # 5) --execute-step:执行 plan 中指定 id 的 step(只允许非危险 step)
+    execute_step_id = getattr(args, "execute_step", None)
+    if execute_step_id:
+        return _wizard_execute_step(plan, execute_step_id, output_dir,
+                                    getattr(args, "run_log", None))
+
     # 默认人类可读:Markdown + 二次确认提示
     print(plan.to_markdown())
     print()
@@ -472,7 +489,7 @@ def _run_wizard(args: argparse.Namespace) -> int:
         if yes_all:
             print("⚠️  --yes 已传,但危险 step 仍需逐个确认(GUI 应弹模态对话框)")
 
-    # 5) 非 dry-run 时,询问是否执行非危险 step
+    # 6) 非 dry-run 时,询问是否执行非危险 step
     dangerous_ids = {s.id for s in plan.steps if s.destructive}
     safe_steps = [s for s in plan.steps if s.id not in dangerous_ids]
     if safe_steps and not use_json and not use_markdown:
@@ -482,6 +499,132 @@ def _run_wizard(args: argparse.Namespace) -> int:
         # (避免 CLI 模式误执行 — 默认 dry-run)
 
     return 0
+
+
+# ─── wizard step 执行 ─────────────────────────────────────
+
+# subprocess 输出尾巴(防止大文件把 jsonl 写爆)
+_STDOUT_TAIL_MAX = 4000
+
+
+def _safe_split_command(command: str) -> list[str]:
+    """把 plan.command 安全拆成 argv 列表。
+
+    永远不用 shell=True(防注入)。
+    Windows + POSIX 都用 shlex.split(posix=False) 保持一致。
+    """
+    try:
+        return shlex.split(command, posix=False)
+    except ValueError:
+        # 引号配不上 → 退到按空格粗拆(够用,wizard command 都很标准)
+        return command.split()
+
+
+def _wizard_execute_step(
+    plan,
+    step_id: str,
+    output_dir: str,
+    run_log: str | None,
+) -> int:
+    """执行 plan 中指定 id 的 step(只允许非危险 step)。
+
+    危险 / 不存在 step 直接返回非 0,不调 subprocess。
+    """
+    target = next((s for s in plan.steps if s.id == step_id), None)
+    if target is None:
+        available = [s.id for s in plan.steps]
+        print(f"❌ step id '{step_id}' 不在 plan 中", file=sys.stderr)
+        print(f"可用 step id: {available}", file=sys.stderr)
+        return 2
+
+    if target.destructive or target.requires_confirmation:
+        print("=" * 60, file=sys.stderr)
+        print(f"❌ 危险步骤不会由 wizard 自动执行: {target.id}", file=sys.stderr)
+        print("=" * 60, file=sys.stderr)
+        print(f"标题: {target.title}", file=sys.stderr)
+        print(f"destructive={target.destructive}  "
+              f"requires_confirmation={target.requires_confirmation}", file=sys.stderr)
+        print(f"提示: {target.notes or '(无)'}", file=sys.stderr)
+        print("请人工确认后复制执行:", file=sys.stderr)
+        print(f"  {target.command}", file=sys.stderr)
+        return 3
+
+    # 打印执行前摘要
+    print("=" * 60)
+    print(f"▶ 执行 step: {target.id} — {target.title}")
+    print(f"  command: {target.command}")
+    print(f"  writes_files: {target.writes_files}")
+    print(f"  network_required: {target.network_required}")
+    print(f"  requires_cookie: {target.requires_cookie}")
+    print("=" * 60)
+
+    argv = _safe_split_command(target.command)
+    start = time.monotonic()
+    try:
+        proc = subprocess.run(
+            argv, shell=False, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=None,
+        )
+        elapsed = time.monotonic() - start
+        stdout_tail = (proc.stdout or "")[-_STDOUT_TAIL_MAX:]
+        stderr_tail = (proc.stderr or "")[-_STDOUT_TAIL_MAX:]
+        status = "succeeded" if proc.returncode == 0 else "failed"
+
+        if proc.stdout:
+            print(proc.stdout, end="")
+        if proc.stderr:
+            print(proc.stderr, end="", file=sys.stderr)
+
+        _wizard_write_run_log(
+            plan, target, proc.returncode, elapsed, status,
+            stdout_tail, stderr_tail, output_dir, run_log,
+        )
+        if proc.returncode != 0:
+            print(f"❌ step '{target.id}' 失败,returncode={proc.returncode}",
+                  file=sys.stderr)
+        else:
+            print(f"✅ step '{target.id}' 成功,耗时 {elapsed:.2f}s")
+        return proc.returncode
+    except FileNotFoundError as e:
+        elapsed = time.monotonic() - start
+        print(f"❌ 找不到可执行文件: {e}", file=sys.stderr)
+        _wizard_write_run_log(
+            plan, target, 127, elapsed, "failed",
+            "", str(e), output_dir, run_log,
+        )
+        return 127
+    except Exception as e:
+        elapsed = time.monotonic() - start
+        print(f"❌ step '{target.id}' 异常: {e}", file=sys.stderr)
+        _wizard_write_run_log(
+            plan, target, 1, elapsed, "failed",
+            "", str(e), output_dir, run_log,
+        )
+        return 1
+
+
+def _wizard_write_run_log(
+    plan, target, returncode: int, elapsed: float, status: str,
+    stdout_tail: str, stderr_tail: str,
+    output_dir: str, run_log: str | None,
+) -> None:
+    """把执行结果 append 到 _wizard_runs.jsonl(UTF-8)。"""
+    log_path = Path(run_log) if run_log else (Path(output_dir) / "_wizard_runs.jsonl")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "intent": plan.intent,
+        "step_id": target.id,
+        "title": target.title,
+        "command": target.command,
+        "returncode": returncode,
+        "elapsed_seconds": round(elapsed, 3),
+        "status": status,
+        "stdout_tail": stdout_tail,
+        "stderr_tail": stderr_tail,
+    }
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def _wizard_ask_intent() -> str:

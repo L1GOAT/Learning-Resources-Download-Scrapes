@@ -86,6 +86,10 @@ cookies_new.txt
 *_report.json
 *_review.html
 
+# Wizard run logs (wizard --execute-step appends one JSONL line per run).
+*_wizard_runs.jsonl
+_wizard_runs.jsonl
+
 # Local course/project data directories.
 archive/
 opensource/

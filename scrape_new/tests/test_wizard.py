@@ -11,6 +11,7 @@ wizard + WorkflowPlanner 测试(第十九轮)
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 import sys
@@ -281,3 +282,274 @@ class TestWorkflowPlanSerialization:
             assert "title" in step
             assert "command" in step
             assert isinstance(step["writes_files"], list)
+
+
+# ─── wizard --execute-step 测试 ────────────────────────────
+
+class _FakeProc:
+    """模拟 subprocess.run 返回值(用 attrs 而不是 CompletedProcess 避免签名差异)。"""
+
+    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = ""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+class TestWizardExecuteStep:
+    """wizard --execute-step 逐步执行能力(第一版,只允许非危险 step)。
+
+    所有测试:
+      - 直接 import _run_wizard,传 mock 的 argparse.Namespace
+      - monkeypatch scrape_new.cli.subprocess.run,不真实子进程
+      - 不真实下载 / 上传 / 网络
+    """
+
+    def _ns(self, **overrides) -> argparse.Namespace:
+        """构造一个 wizard 子命令的 Namespace(走非交互分支:必须给 --intent)。"""
+        base = {
+            "intent": "scan",
+            "platform": "chaoxing",
+            "url": "https://example.com/c",
+            "output_dir": "./out",
+            "cookie_source": "env",
+            "course_id": None,
+            "mapping_path": None,
+            "outline_path": None,
+            "videos_dir": None,
+            "plan_path": None,
+            "retry_list": None,
+            "only_lessons": None,
+            "only_resources": None,
+            "reset_confirm": None,
+            "include_empty_lessons": False,
+            "max_tabs": 4,
+            "json": False,
+            "markdown": False,
+            "no_color": False,
+            "yes": False,
+            "execute_step": None,
+            "run_log": None,
+        }
+        base.update(overrides)
+        return argparse.Namespace(**base)
+
+    def test_execute_safe_step_runs_subprocess_and_writes_log(self, tmp_path, monkeypatch):
+        """1:--execute-step scan 调 subprocess.run + 写 _wizard_runs.jsonl"""
+        from scrape_new import cli
+        from scrape_new.services.workflow_planner import build_workflow_plan
+
+        # 先确认 scan intent 的 plan 中有非危险的 scan step
+        plan = build_workflow_plan(
+            intent="scan", platform="chaoxing", course_url="https://x",
+            output_dir=str(tmp_path), cookie_source="env",
+        )
+        scan_step = next((s for s in plan.steps if s.id == "scan"), None)
+        if scan_step is None:
+            pytest.skip("scan plan 不含 id=scan step(planner 实现变化)")
+        # 强制安全属性(防御性:即使 planner 把它标 dangerous,这个测试也保护语义)
+        scan_step.destructive = False
+        scan_step.requires_confirmation = False
+
+        called = {}
+        def fake_run(argv, **kwargs):
+            called["argv"] = argv
+            called["shell"] = kwargs.get("shell", False)
+            return _FakeProc(returncode=0, stdout="scan done\n", stderr="")
+
+        monkeypatch.setattr(cli.subprocess, "run", fake_run)
+        monkeypatch.setattr("scrape_new.services.workflow_planner.build_workflow_plan", lambda **kw: plan)
+
+        rc = cli._run_wizard(self._ns(
+            intent="scan", output_dir=str(tmp_path),
+            execute_step="scan",
+        ))
+        assert rc == 0
+        # subprocess.run 用了 shell=False
+        assert called["shell"] is False
+        # argv 第一项应该是 python
+        assert called["argv"][0] == "python"
+        # 日志文件
+        log = tmp_path / "_wizard_runs.jsonl"
+        assert log.exists()
+        lines = [json.loads(l) for l in log.read_text(encoding="utf-8").splitlines() if l]
+        assert len(lines) == 1
+        rec = lines[0]
+        assert rec["step_id"] == "scan"
+        assert rec["status"] == "succeeded"
+        assert rec["returncode"] == 0
+        assert "command" in rec
+        assert "stdout_tail" in rec
+        assert "stderr_tail" in rec
+
+    def test_execute_unknown_step_returns_nonzero_no_subprocess(self, tmp_path, monkeypatch, capsys):
+        """2:--execute-step nope → 返非 0,列出可用 id,不调 subprocess"""
+        from scrape_new import cli
+        from scrape_new.services.workflow_planner import build_workflow_plan
+
+        plan = build_workflow_plan(
+            intent="download", platform="chaoxing", course_url="https://x",
+            output_dir=str(tmp_path), cookie_source="env",
+        )
+
+        def fail_run(*a, **kw):
+            raise AssertionError("subprocess.run 不应该被调用")
+        monkeypatch.setattr(cli.subprocess, "run", fail_run)
+        monkeypatch.setattr("scrape_new.services.workflow_planner.build_workflow_plan", lambda **kw: plan)
+
+        rc = cli._run_wizard(self._ns(
+            intent="download", output_dir=str(tmp_path),
+            execute_step="nope",
+        ))
+        assert rc != 0
+        captured = capsys.readouterr()
+        out_err = (captured.out + captured.err).lower()
+        # 列出可用 id(任一 plan 里的 step id 都应出现)
+        available_ids = [s.id for s in plan.steps]
+        assert any(sid in out_err for sid in available_ids), \
+            f"stderr/stdout 应列出可用 step id; got: {captured.err[:300]}"
+        # 日志不应被写
+        assert not (tmp_path / "_wizard_runs.jsonl").exists()
+
+    def test_execute_dangerous_step_refuses_and_shows_command(self, tmp_path, monkeypatch, capsys):
+        """3:--execute-step apply_plan(destructive)→ 拒绝,显示命令,不调 subprocess"""
+        from scrape_new import cli
+        from scrape_new.services.workflow_planner import build_workflow_plan, WorkflowStep
+
+        # 预创建 _upload_plan.json(planner 才会生成 apply_plan step)
+        plan_path = tmp_path / "_upload_plan.json"
+        plan_path.write_text("{}", encoding="utf-8")
+
+        plan = build_workflow_plan(
+            intent="upload", platform="chaoxing", course_url="",
+            output_dir=str(tmp_path), cookie_source="env",
+            options={"course_id": "1234", "mapping_path": "./_mapping.json",
+                     "plan_path": str(plan_path)},
+        )
+        apply_step = next((s for s in plan.steps if s.id == "apply_plan"), None)
+        if apply_step is None:
+            pytest.skip("upload plan 不含 apply_plan step(planner 变了)")
+        # 强制危险属性
+        apply_step.destructive = True
+        apply_step.requires_confirmation = True
+
+        def fail_run(*a, **kw):
+            raise AssertionError("subprocess.run 不应该被调用(dangerous step)")
+        monkeypatch.setattr(cli.subprocess, "run", fail_run)
+        monkeypatch.setattr("scrape_new.services.workflow_planner.build_workflow_plan", lambda **kw: plan)
+
+        rc = cli._run_wizard(self._ns(
+            intent="upload", output_dir=str(tmp_path),
+            course_id="1234", mapping_path="./_mapping.json",
+            plan_path=str(plan_path),
+            execute_step="apply_plan",
+        ))
+        assert rc != 0
+        captured = capsys.readouterr()
+        # 提示危险 / 不自动执行
+        assert "危险" in (captured.out + captured.err) or \
+               "destructive" in (captured.out + captured.err).lower() or \
+               "requires_confirmation" in (captured.out + captured.err)
+        # 提示用户复制命令
+        assert apply_step.command in captured.out or apply_step.command in captured.err
+        # 不应写日志
+        assert not (tmp_path / "_wizard_runs.jsonl").exists()
+
+    def test_execute_step_failure_returns_returncode_and_logs_failed(self, tmp_path, monkeypatch):
+        """4:mock returncode=7 → _run_wizard 返 7,日志 status=failed"""
+        from scrape_new import cli
+        from scrape_new.services.workflow_planner import build_workflow_plan
+
+        plan = build_workflow_plan(
+            intent="scan", platform="chaoxing", course_url="https://x",
+            output_dir=str(tmp_path), cookie_source="env",
+        )
+        scan_step = next((s for s in plan.steps if s.id == "scan"), None)
+        if scan_step is None:
+            pytest.skip("scan plan 不含 scan step")
+        scan_step.destructive = False
+        scan_step.requires_confirmation = False
+
+        def fake_run(argv, **kwargs):
+            return _FakeProc(returncode=7, stdout="oops\n", stderr="boom\n")
+        monkeypatch.setattr(cli.subprocess, "run", fake_run)
+        monkeypatch.setattr("scrape_new.services.workflow_planner.build_workflow_plan", lambda **kw: plan)
+
+        rc = cli._run_wizard(self._ns(
+            intent="scan", output_dir=str(tmp_path),
+            execute_step="scan",
+        ))
+        assert rc == 7
+        log = tmp_path / "_wizard_runs.jsonl"
+        recs = [json.loads(l) for l in log.read_text(encoding="utf-8").splitlines() if l]
+        assert recs[0]["status"] == "failed"
+        assert recs[0]["returncode"] == 7
+        assert recs[0]["stderr_tail"].endswith("boom\n")
+
+    def test_custom_run_log_path_does_not_write_default(self, tmp_path, monkeypatch):
+        """5:--run-log custom.jsonl → 写到 custom.jsonl,默认 _wizard_runs.jsonl 不应出现"""
+        from scrape_new import cli
+        from scrape_new.services.workflow_planner import build_workflow_plan
+
+        plan = build_workflow_plan(
+            intent="scan", platform="chaoxing", course_url="https://x",
+            output_dir=str(tmp_path), cookie_source="env",
+        )
+        scan_step = next((s for s in plan.steps if s.id == "scan"), None)
+        if scan_step is None:
+            pytest.skip("scan plan 不含 scan step")
+        scan_step.destructive = False
+        scan_step.requires_confirmation = False
+
+        monkeypatch.setattr(cli.subprocess, "run",
+                            lambda *a, **kw: _FakeProc(0, "", ""))
+        monkeypatch.setattr("scrape_new.services.workflow_planner.build_workflow_plan", lambda **kw: plan)
+
+        custom_log = tmp_path / "custom.jsonl"
+        rc = cli._run_wizard(self._ns(
+            intent="scan", output_dir=str(tmp_path),
+            execute_step="scan", run_log=str(custom_log),
+        ))
+        assert rc == 0
+        assert custom_log.exists()
+        # 默认 _wizard_runs.jsonl 不应出现
+        assert not (tmp_path / "_wizard_runs.jsonl").exists()
+        recs = [json.loads(l) for l in custom_log.read_text(encoding="utf-8").splitlines() if l]
+        assert len(recs) == 1
+
+    def test_execute_audit_step_command_and_log(self, tmp_path, monkeypatch):
+        """6:--execute-step audit_scan(audit intent)→ command 含 audit,日志写入"""
+        from scrape_new import cli
+        from scrape_new.services.workflow_planner import build_workflow_plan
+
+        plan = build_workflow_plan(
+            intent="audit", platform="unknown", course_url="",
+            output_dir=str(tmp_path), cookie_source="none",
+        )
+        audit_step = next((s for s in plan.steps if "audit" in s.id), None)
+        if audit_step is None:
+            pytest.skip("audit plan 不含 audit step")
+        audit_step.destructive = False
+        audit_step.requires_confirmation = False
+
+        called = {}
+        def fake_run(argv, **kwargs):
+            called["argv"] = argv
+            return _FakeProc(0, "audit done\n", "")
+        monkeypatch.setattr(cli.subprocess, "run", fake_run)
+        monkeypatch.setattr("scrape_new.services.workflow_planner.build_workflow_plan", lambda **kw: plan)
+
+        rc = cli._run_wizard(self._ns(
+            intent="audit", platform="unknown",
+            output_dir=str(tmp_path), cookie_source="none",
+            execute_step=audit_step.id,
+        ))
+        assert rc == 0
+        # command 拼接成字符串应包含 "python -m scrape_new audit"
+        cmd_str = " ".join(called["argv"])
+        assert "audit" in cmd_str.lower()
+        assert "scrape_new" in cmd_str
+        # 日志
+        log = tmp_path / "_wizard_runs.jsonl"
+        recs = [json.loads(l) for l in log.read_text(encoding="utf-8").splitlines() if l]
+        assert recs[0]["step_id"] == audit_step.id
+        assert recs[0]["status"] == "succeeded"
