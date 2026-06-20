@@ -19,16 +19,11 @@ from pathlib import Path
 
 import pytest
 
-
-PYTHON = sys.executable
-
-# 仓库根:scrape_new/tests/ → parents[2]。
-# subprocess.run(..., cwd=...) 不能写死 "E:/林视" 这种本地路径,
-# CI runner(linux/windows)找不到,会 FileNotFoundError。
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# 共享路径常量 — 见 scrape_new/tests/_paths.py
+from scrape_new.tests._paths import PROJECT_ROOT
 
 
-# ─── planner 测试(纯函数) ────────────────────────────────
+PYTHON = sys.executable# ─── planner 测试(纯函数) ────────────────────────────────
 
 class TestPlanner:
     """1-5:planner 各 intent 行为"""
