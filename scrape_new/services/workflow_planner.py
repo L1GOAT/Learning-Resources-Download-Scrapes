@@ -34,6 +34,7 @@ class Intent(str, Enum):
     RETRY_FAILED = "retry"         # 重试上次失败资源
     MODIFY = "modify"              # 局部修改(只动某一节/某个资源)
     AUDIT = "audit"                # 资源智能审计(不下载不上传,只生成报告)
+    ACCEPT = "accept"              # 课程本地验收总报告(汇总 audit/manifest/mapping 等)
     UNKNOWN = "unknown"
 
 
@@ -308,6 +309,8 @@ def build_workflow_plan(
         _plan_modify(plan, output_dir, cookie, options)
     elif intent == Intent.AUDIT.value:
         _plan_audit(plan, output_dir, options)
+    elif intent == Intent.ACCEPT.value:
+        _plan_accept(plan, output_dir, options)
     else:
         # UNKNOWN — 给一个空 plan + 友好 next_suggestion
         plan.next_suggestions = [
@@ -653,5 +656,43 @@ def _plan_audit(plan, output_dir, options):
         "打开 _resource_audit.md 看高风险节(可能要补资源 / 修正 mapping)",
         "CSV 可给 GUI 直接渲染成表格(高风险节标红)",
         "audit 标记 low_confidence_role 的资源:需要人工确认角色",
+    ]
+    plan.risk_level = RiskLevel.SAFE.value
+
+
+def _plan_accept(plan, output_dir, options):
+    """课程本地验收总报告:把 output_dir 下所有本地产物汇总,给"能不能进下一步"判定。
+
+    不下载 / 不上传,只读本地 _chapter_tree/_manifest/_audit/_mapping/_upload_plan/_retry
+    写 _course_acceptance.{json,md},状态:READY / REVIEW / BLOCKED / INCOMPLETE。
+    """
+    plan.steps.append(WorkflowStep(
+        id="accept",
+        title="accept(课程本地验收总报告)",
+        command=(
+            f'python -m scrape_new accept --output-dir "{output_dir}"'
+        ),
+        writes_files=[
+            f"{output_dir}/_course_acceptance.json",
+            f"{output_dir}/_course_acceptance.md",
+        ],
+        network_required=False,
+        requires_cookie=False,
+        destructive=False,
+        notes=(
+            "纯本地验收报告,汇总 audit/manifest/mapping/upload_plan;"
+            "状态:READY / REVIEW / BLOCKED / INCOMPLETE"
+        ),
+    ))
+
+    plan.expected_outputs = [
+        f"{output_dir}/_course_acceptance.md",
+        f"{output_dir}/_course_acceptance.json",
+    ]
+    plan.next_suggestions = [
+        "打开 _course_acceptance.md 看总状态 + 风险分组 + 下一步命令",
+        "BLOCKED: 先修 high risk(missing_local_file / duplicate_* / non_video_in_video_slot)",
+        "REVIEW: 人工确认 medium risk 后, 跑 build-mapping / upload --plan-only",
+        "READY: 直接进入 build-mapping 或 upload --plan-only",
     ]
     plan.risk_level = RiskLevel.SAFE.value
