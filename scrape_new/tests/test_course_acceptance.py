@@ -25,6 +25,11 @@ import pytest
 
 # ─── helper ──────────────────────────────────────────
 
+# 仓库根:子进程必须从仓库根启动 `python -m scrape_new`, 否则 CI 上
+# "No module named scrape_new"。见 scrape_new/tests/_paths.py。
+from scrape_new.tests._paths import PROJECT_ROOT
+
+
 def _ns(**overrides) -> argparse.Namespace:
     """构造一个 wizard 子命令的 Namespace(走非交互分支)。"""
     base = {
@@ -329,7 +334,8 @@ class TestCLIAccept:
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUTF8"] = "1"
         r = subprocess.run(cmd, capture_output=True, text=True,
-                           encoding="utf-8", timeout=30, env=env)
+                           encoding="utf-8", timeout=30, env=env,
+                           cwd=str(PROJECT_ROOT))
         assert r.returncode in (0, 2), f"stderr={r.stderr[:200]}"
         data = json.loads(r.stdout)
         assert "status" in data
@@ -351,7 +357,8 @@ class TestCLIAccept:
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUTF8"] = "1"
         r = subprocess.run(cmd, capture_output=True, text=True,
-                           encoding="utf-8", timeout=30, env=env)
+                           encoding="utf-8", timeout=30, env=env,
+                           cwd=str(PROJECT_ROOT))
         assert r.returncode in (0, 2)
         out = r.stdout
         # 含 Course Acceptance Report 标题
