@@ -80,6 +80,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.subcmd == "audit":
             return _cmd_audit(args)
 
+        if args.subcmd == "accept":
+            return _cmd_accept(args)
+
         # 单个下载任务
         if not args.url:
             parser.error("请提供 URL")
@@ -256,7 +259,7 @@ def _create_parser() -> argparse.ArgumentParser:
         )
         sp.add_argument("--intent", "-i", required=False,
                         choices=["download", "scan", "build_mapping", "upload",
-                                 "retry", "modify", "audit", "unknown"],
+                                 "retry", "modify", "audit", "accept", "unknown"],
                         help="用户意图")
         sp.add_argument("--platform", "-p", required=False,
                         choices=["chaoxing", "xuetangx", "zhihuishu", "icourse163"],
@@ -325,6 +328,36 @@ def _create_parser() -> argparse.ArgumentParser:
     audit_parser.add_argument("--output-dir", default=".", help="报告输出目录")
     audit_parser.add_argument("--expected-tab-count", type=int, default=None,
                               help="期望的 tab 扫描数(给 scan-only 用,默认 None)")
+
+    # accept 子命令:课程验收总报告(本地产物汇总)
+    accept_parser = subparsers.add_parser(
+        "accept",
+        help="课程本地验收总报告(读 _chapter_tree/_manifest/_audit/_mapping 等)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  # 标准用法
+  python -m scrape_new accept --output-dir ./mycourse
+
+  # 只输出 JSON(给 GUI / CI 消费)
+  python -m scrape_new accept --output-dir ./mycourse --json
+
+  # 只输出 Markdown
+  python -m scrape_new accept --output-dir ./mycourse --markdown
+
+设计:
+  - 纯本地 IO, 不访问网络 / 不需要 cookie
+  - 文件缺失 / JSON 解析失败 不崩, 转成 risk
+  - 状态: READY / REVIEW / BLOCKED / INCOMPLETE
+  - 输出 _course_acceptance.json / _course_acceptance.md
+        """,
+    )
+    accept_parser.add_argument("--output-dir", required=True,
+                               help="课程输出目录(读 _chapter_tree.json 等本地产物)")
+    accept_parser.add_argument("--json", action="store_true",
+                               help="只打印 JSON 到 stdout(不写文件, 不打 Markdown)")
+    accept_parser.add_argument("--markdown", action="store_true",
+                               help="只打印 Markdown 到 stdout(不写文件)")
 
     return parser
 
@@ -640,16 +673,20 @@ def _wizard_ask_intent() -> str:
     print("  4) upload      上传到老师后台(默认 plan-first)")
     print("  5) retry       重试失败下载")
     print("  6) modify      局部上传(只动某一节/某个资源)")
+    print("  7) audit       资源智能审计(漏扫 / 错分类 / 挂错节)")
+    print("  8) accept      课程验收总报告(汇总 audit/manifest/mapping)")
     print()
     while True:
-        choice = input("请输入数字 [1-6] 或直接输入意图: ").strip()
+        choice = input("请输入数字 [1-8] 或直接输入意图: ").strip()
         mapping = {"1": "download", "2": "scan", "3": "build_mapping",
-                  "4": "upload", "5": "retry", "6": "modify"}
+                  "4": "upload", "5": "retry", "6": "modify",
+                  "7": "audit", "8": "accept"}
         if choice in mapping:
             return mapping[choice]
-        if choice in ("download", "scan", "build_mapping", "upload", "retry", "modify"):
+        if choice in ("download", "scan", "build_mapping", "upload", "retry",
+                      "modify", "audit", "accept"):
             return choice
-        print("  输入有误,请重试(1-6 或意图名)")
+        print("  输入有误,请重试(1-8 或意图名)")
 
 
 def _wizard_ask_platform() -> str:
@@ -775,6 +812,62 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     print(f"  建议: {len(report.recommendations)}")
     print("=" * 60)
     return 0
+
+
+def _cmd_accept(args: argparse.Namespace) -> int:
+    """accept 子命令 — 读本地 output_dir, 产 _course_acceptance.{json,md}。
+
+    设计:
+      - 纯本地 IO, 不访问网络 / 不需要 cookie
+      - 文件缺失 / JSON 解析失败 不崩, 转成 risk / missing_inputs
+      - 状态: READY / REVIEW / BLOCKED / INCOMPLETE
+      - --json / --markdown 模式: 只打印到 stdout, 不写文件
+      - 默认: 写 2 份文件 + 打印摘要
+    """
+    from .services.course_acceptance import (
+        build_course_acceptance_report,
+        write_course_acceptance_reports,
+    )
+
+    output_dir = Path(getattr(args, "output_dir", None) or ".")
+    use_json = bool(getattr(args, "json", False))
+    use_markdown = bool(getattr(args, "markdown", False))
+
+    if not use_json and not use_markdown:
+        # 默认行为: 写文件 + 摘要
+        # 但 output_dir 不存在时不写,只给报告(报告本身能容错)
+        report = build_course_acceptance_report(output_dir)
+        # 写文件 — 即使 output_dir 原本不存在也 mkdir
+        paths = write_course_acceptance_reports(report, output_dir)
+        print("[accept] 报告已写:")
+        for k, p in paths.items():
+            print(f"  - {p}")
+        print()
+        print("=" * 60)
+        print(f"  状态:{report.status}")
+        high = sum(1 for r in report.risks if r.level == "high")
+        medium = sum(1 for r in report.risks if r.level == "medium")
+        print(f"  风险:high={high}, medium={medium}, total={len(report.risks)}")
+        print(f"  建议:({len(report.recommendations)})")
+        for r in report.recommendations[:3]:
+            print(f"    - {r}")
+        print(f"  下一步命令:(前 3 条)")
+        for c in report.next_commands[:3]:
+            print(f"    $ {c}")
+        # 状态码:INCOMPLETE / BLOCKED 返 2 表示需要用户介入
+        return 2 if report.status in ("INCOMPLETE", "BLOCKED") else 0
+
+    if use_json:
+        # --json: 只打印 JSON, 不写文件
+        report = build_course_acceptance_report(output_dir)
+        print(report.to_json(indent=2))
+        return 2 if report.status in ("INCOMPLETE", "BLOCKED") else 0
+
+    # --markdown: 只打印 Markdown, 不写文件
+    from .services.course_acceptance import _render_md  # type: ignore
+    report = build_course_acceptance_report(output_dir)
+    print(_render_md(report))
+    return 2 if report.status in ("INCOMPLETE", "BLOCKED") else 0
 
 
 def _raise_risk_local(lesson_audit, level: str) -> None:
