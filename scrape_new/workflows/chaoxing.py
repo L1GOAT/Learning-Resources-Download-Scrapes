@@ -11,33 +11,34 @@
   python scrape_new/workflows/chaoxing.py "URL" mycourse --scan-only
 
 示例:
-  python -m scrape_new.workflows.chaoxing "URL" mycourse
-  python -m scrape_new.workflows.chaoxing "URL" --outline-only --cpi 47283756
-  python -m scrape_new.workflows.chaoxing "URL" --playwright  # 首次下载需真点视频
-  python -m scrape_new.workflows.chaoxing "URL" mycourse --scan-only  # 只扫资源不下文件
-  python -m scrape_new.workflows.chaoxing "URL" mycourse --max-tabs 6  # 多 tab 探测
-  python -m scrape_new.workflows.chaoxing "URL" mycourse --resume _resource_naming_manifest.json  # 增量
+  python -m scrape_new.workflows.chaoxing "URL" mycourse --scan-only
+  python -m scrape_new.workflows.chaoxing "URL" mycourse --max-tabs 6
+  python -m scrape_new.workflows.chaoxing "URL" mycourse --cookies-file %TEMP%\\scrape_cookie_xxx.txt
+  # (完整选项见下; 详细 --cookies-file 用法见 scrape_new/services/redaction.py)
 
 选项:
   --scan-only            只扫描章节和资源,不下载文件
   --max-tabs N           多 tab 探测数(默认 4)
-  --include-empty-lessons  scan-only 报告里包含 0 资源章/节(默认跳过,后台不建空章)
-  --resume <path>        从历史 _resource_naming_manifest.json 跳过已下资源
-  --retry-downloads <path>  只重下 _retry_downloads.json 里的资源
-  --verify-resume-only   不下载,只判断哪些会跳过(配合 --resume)
+  --include-empty-lessons  scan-only 报告里包含 0 资源章/节
+  --resume <path>        从历史 manifest 跳过已下资源
+  --retry-downloads <path>  只重下 retry 列表里的资源
+  --verify-resume-only   不下载,只判断哪些会跳过
   --outline-only         只扒章节树不下载视频
-  --playwright           用 Playwright 真点视频建立 ananas 会话(绕 learning_id 风控)
-  --cpi <数字>           手动指定 cpi(不从 URL 自动提取)
+  --playwright           用 Playwright 真点视频建立 ananas 会话
+  --cpi <数字>           手动指定 cpi
+  --cookies-file <path>  从外部路径读 cookie(repo 外, 优先级最高)
   --debug                打印调试信息
 
-前置条件:
-  1. pip install requests beautifulsoup4
-  2. pip install playwright && playwright install chromium (仅 --playwright 模式需要)
-  3. 项目根目录有 cookies.txt 或设 XTBZ_COOKIE 环境变量
+cookie 优先级(从高到低):
+  1. --cookies-file <外部路径>  (推荐)
+  2. XTBZ_COOKIE 环境变量
+  3. 项目根 cookies.txt         (默认 fallback)
+  详细见 scrape_new/services/redaction.py
 
 输出:
-  <输出目录>/视频/01_xxx.mp4 ... (视频文件)
-  <输出目录>/视频/_chapter_outline.json (章节目录,可直接喂给 scrape.upload 建课)
+  <输出目录>/视频/01_xxx.mp4 ...
+  <输出目录>/_chapter_tree.json (章节目录)
+  <输出目录>/_resource_naming_manifest.json
 """
 
 # ─── sys.path bootstrap ───────────────────────────────────
@@ -117,40 +118,117 @@ HEADERS = {
 }
 
 
+def _browser_nav_headers(referer: str | None = None) -> dict:
+    """Headers for Chaoxing document navigation endpoints."""
+    headers = dict(HEADERS)
+    headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/149.0.0.0 Safari/537.36"
+        ),
+        "Accept": (
+            "text/html,application/xhtml+xml,application/xml;q=0.9,"
+            "image/avif,image/webp,image/apng,*/*;q=0.8,"
+            "application/signed-exchange;v=b3;q=0.7"
+        ),
+        "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Cache-Control": "max-age=0",
+        "Connection": "keep-alive",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+    })
+    if referer:
+        headers["Referer"] = referer
+    return headers
+
+
 # ─── 工具函数 ──────────────────────────────────────────────────
 
-def load_cookies(session, filepath):
-    """从 cookies.txt 或 XTBZ_COOKIE 环境变量加载 Cookie。
-
-    优先级: XTBZ_COOKIE 环境变量 > cookies.txt 文件 > 报错退出
+def load_cookies(session, filepath, cookies_file=None):
+    """加载 Cookie。优先级:
+        1. cookies_file(外部路径参数,如 %TEMP%\\scrape_cookie_xxx.txt)
+        2. XTBZ_COOKIE 环境变量
+        3. filepath(默认 scrape_new 项目根 cookies.txt)
+    cookie 内容**只**进 session 对象, 不打印 / 不写任何中间文件 / 不进 shell。
     """
-    # 1. 环境变量优先(用户偏好 in-memory,cookie 不落盘)
+    # 1. 外部 cookie 文件参数(本会话安全加载)
+    if cookies_file:
+        if not os.path.exists(cookies_file):
+            print(f"[错误] 找不到 --cookies-file: {cookies_file}")
+            sys.exit(1)
+        with open(cookies_file, "r", encoding="utf-8") as f:
+            raw = f.read().strip()
+        raw = _extract_cookie_string(raw)
+        _parse_cookie_string(session, raw)
+        print(f"[OK] 已加载 Cookie 来自 --cookies-file ({len(session.cookies)} 个字段)")
+        return
+
+    # 2. 环境变量优先(用户偏好 in-memory,cookie 不落盘)
     env_cookie = os.environ.get("XTBZ_COOKIE", "").strip()
     if env_cookie:
-        raw = env_cookie
+        raw = _extract_cookie_string(env_cookie)
         _parse_cookie_string(session, raw)
         print(f"[OK] 已加载 Cookie 来自 XTBZ_COOKIE 环境变量({len(session.cookies)} 个字段)")
         return
 
-    # 2. 文件 fallback
+    # 3. 文件 fallback(原 cookies.txt 行为, 不破坏兼容)
     if not os.path.exists(filepath):
         print(f"[错误] 找不到 {filepath}，请先导出 Cookie")
         print(f"  或者设环境变量 XTBZ_COOKIE='<原始 cookie 字符串>'")
+        print(f"  或者传 --cookies-file <外部路径>")
         print(f"  导出方法见 MACOS_DEPLOY.md 或 SESSION_PROTOCOL.md")
         sys.exit(1)
     with open(filepath, "r", encoding="utf-8") as f:
         raw = f.read().strip()
+    raw = _extract_cookie_string(raw)
     _parse_cookie_string(session, raw)
     print(f"[OK] 已加载 Cookie 来自 {filepath} ({len(session.cookies)} 个字段)")
 
 
+def _extract_cookie_string(raw: str) -> str:
+    """Accept a raw cookie string or a copied curl command and return cookies only."""
+    text = raw.strip()
+    if not text.lower().lstrip().startswith("curl "):
+        return text
+
+    # curl ... -b 'a=b; c=d'
+    m = re.search(r"(?:^|\s)-b\s+(['\"])(.*?)\1", text, re.S)
+    if m:
+        return m.group(2).strip()
+
+    # curl ... -H 'Cookie: a=b; c=d'
+    m = re.search(r"(?:^|\s)-H\s+(['\"])Cookie:\s*(.*?)\1", text, re.I | re.S)
+    if m:
+        return m.group(2).strip()
+
+    return text
+
+
 def _parse_cookie_string(session, raw, domain=".chaoxing.com"):
     """解析原始 cookie 字符串并塞到 session.cookies。"""
+    from http.cookies import SimpleCookie
+
+    jar = SimpleCookie()
+    try:
+        jar.load(raw)
+    except Exception:
+        jar = SimpleCookie()
+
+    if jar:
+        for key, morsel in jar.items():
+            session.cookies.set(key, morsel.value, domain=domain)
+        return
+
+    # Fallback for non-standard cookie snippets.
     for pair in raw.split(";"):
         pair = pair.strip()
         if "=" in pair:
             k, v = pair.split("=", 1)
-            session.cookies.set(k.strip(), v.strip(), domain=domain)
+            session.cookies.set(k.strip(), v.strip().strip('"'), domain=domain)
 
 
 def extract_params(url):
@@ -222,7 +300,79 @@ def sanitize_filename(name):
 
 # ─── 核心流程 ──────────────────────────────────────────────────
 
-def get_chapter_tree(session, course_id, clazz_id, debug=False):
+def _warmup_session(session, course_url: str, clazz_id: str | int) -> str:
+    """会话预热: 让超星认为这是浏览器行为而不是直接 API 调用。
+
+    超星新版(2024+)对直接 GET teacherstudycourselist 返 400。
+    需要先 GET 课程主页 + tchcourse 页面建立 session + 拿 csrf/enc,
+    再用完整 Referer / Origin 头拉章节树。
+
+    Returns:
+        warmup_url 用于章节树请求的 Referer 头(成功 warmup 后的 URL)
+    """
+    print("[扫描] 预热会话(warmup)...")
+
+    # 强制禁用代理环境变量影响(本机可能设了 HTTP_PROXY)
+    session.trust_env = False
+    session.proxies = {"http": None, "https": None}
+
+    # 1) 先 GET 用户给的课程 URL(可能是 teacherstudy / tchcourse / studentstudy)
+    try:
+        r1 = session.get(
+            course_url,
+            timeout=30,
+            allow_redirects=True,
+            headers=_browser_nav_headers(course_url),
+        )
+        print(f"  [warmup] GET 课程主页 → {r1.status_code} (len={len(r1.text)})")
+    except Exception as e:
+        print(f"  [warmup] GET 课程主页失败(忽略): {type(e).__name__}: {e}")
+
+    # 2) 再 GET tchcourse 页面(warmup 拿 enc / openc / cpi)
+    tchcourse_url = (
+        f"https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/tchcourse"
+        f"?courseid={_extract_course_id_from_url(course_url)}"
+        f"&clazzid={clazzid_for_request(clazz_id)}"
+    )
+    try:
+        r2 = session.get(
+            tchcourse_url,
+            timeout=30,
+            allow_redirects=True,
+            headers=_browser_nav_headers(course_url),
+        )
+        print(f"  [warmup] GET tchcourse → {r2.status_code} (len={len(r2.text)})")
+        # 成功就用这个当 Referer(更稳)
+        if r2.status_code == 200:
+            return tchcourse_url
+    except Exception as e:
+        print(f"  [warmup] GET tchcourse 失败(忽略): {type(e).__name__}: {e}")
+
+    # fallback: 用原 URL
+    return course_url
+
+
+def _extract_course_id_from_url(url: str) -> str:
+    """从 URL 提取 courseId / courseid(支持多种大小写)。"""
+    from urllib.parse import urlparse, parse_qs
+    parsed = urlparse(url)
+    params = parse_qs(parsed.query)
+    return (
+        params.get("courseId", params.get("courseid", [None]))[0]
+        or params.get("courseid", [None])[0]
+        or ""
+    )
+
+
+def get_chapter_tree(
+    session,
+    course_id,
+    clazz_id,
+    course_url=None,
+    output_dir=None,
+    debug=False,
+    cpi=None,
+):
     """从新版超星 /teacherstudycourselist 拉章节树(HTML 格式)。
 
     新版(2024+)结构:
@@ -231,22 +381,63 @@ def get_chapter_tree(session, course_id, clazz_id, debug=False):
       - 章内 <div class="posCatalog_level"> 嵌套 <ul> 包含该章所有课时
       - 每节 <li> 内 <div class="posCatalog_select" id="cur<lesson_id>"> 放节名
       - 节的 <span> 有 onclick="getTeacherAjax('cid','clzid','chapterid')"
+
+    Args:
+        course_url: 原始课程 URL(warmup 用), 默认从 course_id 拼。
     """
     print("[扫描] 正在获取课程章节列表...")
+
+    # 用传入的 course_url, 否则拼一个
+    if not course_url:
+        course_url = (
+            f"https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/teacherstudy"
+            f"?courseId={course_id}&chapterId=&clazzid={clazzid_for_request(clazz_id)}"
+        )
+
+    # 会话预热(超星新版必需)
+    referer_url = _warmup_session(session, course_url, clazz_id)
+
+    # 完整 URL(带 chapterId=&isMicroCourse 等参数)
     url = (
         f"https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/teacherstudycourselist"
         f"?courseId={course_id}&chapterId=&clazzid={clazzid_for_request(clazz_id)}"
         f"&isMicroCourse=false&topicModelId=0&microTopicId=0"
     )
-    resp = session.get(url, timeout=30)
+    if cpi:
+        url += f"&cpi={cpi}"
+
+    # 给这个请求加完整 headers(超星反爬依赖 Referer / Origin)
+    req_headers = _browser_nav_headers(referer_url)
+    req_headers["Origin"] = "https://mooc2-ans.chaoxing.com"
+
+    resp = session.get(url, timeout=30, headers=req_headers)
     html = resp.text
 
     if debug:
         print(f"\n  [DEBUG] 章节树 URL: {url}")
+        print(f"  [DEBUG] Referer: {referer_url}")
         print(f"  [DEBUG] 状态: {resp.status_code}, 长度: {len(html)}")
-        print(f"  [DEBUG] 前 2000 字符:")
-        print(html[:2000])
-        print("  [DEBUG] ---END---\n")
+        print(f"  [DEBUG] 前 1500 字符:")
+        print(html[:1500])
+        print(f"  [DEBUG] ---END---\n")
+
+    if resp.status_code != 200:
+        print(f"[错误] teacherstudycourselist 返回 {resp.status_code} (期望 200)")
+        # 保存脱敏 debug(不写 cookie, 但写 HTML 和 URL 给用户排查)
+        try:
+            from scrape_new.services.redaction import redact_sensitive
+            # 用 output_dir 写 debug(如果给了); fallback 到 cwd
+            debug_dir = Path(output_dir) if output_dir else Path.cwd()
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            debug_path = debug_dir / "_chaoxing_tree_debug.html"
+            # 注意: 这只写 HTML, 不写 cookie 文件
+            # 但 HTML 可能含 cookie(超星有时把 cookie 渲染在 inline script 里),
+            # 所以先脱敏
+            debug_path.write_text(redact_sensitive(html), encoding="utf-8")
+            print(f"  [debug] HTML 已脱敏保存: {debug_path}")
+        except Exception as e:
+            print(f"  [debug] 保存 debug HTML 失败: {e}")
+        return []
 
     if not HAS_BS4:
         print("[错误] 需要 beautifulsoup4 — pip install beautifulsoup4")
@@ -258,6 +449,16 @@ def get_chapter_tree(session, course_id, clazz_id, debug=False):
     root_ul = soup.find("ul")
     if not root_ul:
         print("[错误] 找不到章节树根 <ul>")
+        # 即使 200, HTML 结构可能变了(超星改版) — 保存脱敏 HTML
+        try:
+            from scrape_new.services.redaction import redact_sensitive
+            debug_dir = Path(output_dir) if output_dir else Path.cwd()
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            debug_path = debug_dir / "_chaoxing_tree_debug.html"
+            debug_path.write_text(redact_sensitive(html), encoding="utf-8")
+            print(f"  [debug] HTML 已脱敏保存(根 ul 缺失): {debug_path}")
+        except Exception as e:
+            print(f"  [debug] 保存失败: {e}")
         return []
 
     chapters: list[dict] = []
@@ -904,13 +1105,22 @@ def main():
     session = requests.Session()
     session.headers.update(HEADERS)
 
+    # 解析 --cookies-file(外部 cookie 路径, 可在 repo 外)
+    cookies_file_arg: str | None = None
+    if "--cookies-file" in sys.argv:
+        idx = sys.argv.index("--cookies-file")
+        if idx + 1 >= len(sys.argv):
+            print("[错误] --cookies-file 需要路径参数")
+            sys.exit(1)
+        cookies_file_arg = sys.argv[idx + 1]
+
     # 加载 Cookie
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(os.path.dirname(script_dir))
     cookies_path = os.path.join(project_root, COOKIES_FILE)
     if not os.path.exists(cookies_path):
         cookies_path = COOKIES_FILE
-    load_cookies(session, cookies_path)
+    load_cookies(session, cookies_path, cookies_file=cookies_file_arg)
 
     # 验证 Cookie
     if not validate_cookie(session, course_url):
@@ -936,7 +1146,13 @@ def main():
         print("[警告] 未找到 cpi，尝试继续...")
 
     # 获取章节树
-    lessons = get_chapter_tree(session, course_id, clazz_id, debug=("--debug" in sys.argv))
+    lessons = get_chapter_tree(
+        session, course_id, clazz_id,
+        course_url=course_url,
+        output_dir=output_dir,
+        debug=("--debug" in sys.argv),
+        cpi=cpi,
+    )
     if not lessons:
         print("[错误] 未找到任何章节")
         sys.exit(1)
